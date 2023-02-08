@@ -23,7 +23,12 @@ parser.add_argument('--fov_y', type=float, default=1,
                     help='scale of FOV y, full res == 1')
 parser.add_argument('--fov_z', type=float, default=1,
                     help='scale of FOV z, full res == 1')
-
+parser.add_argument('--matrix_x', type=int, default=256,
+                    help='matrix size x')
+parser.add_argument('--matrix_y', type=int, default=256,
+                    help='matrix size y')
+parser.add_argument('--matrix_z', type=int, default=28,
+                    help='matrix size z')
 parser.add_argument('--lambda_TV', type=float, default=5e-2,
                     help='TV regularization, default is 0.05')
 parser.add_argument('--outer_iter', type=int, default=20,
@@ -43,11 +48,12 @@ lambda_TV = args.lambda_TV
 device = args.device
 outer_iter = args.outer_iter
 fov_scale = (args.fov_x, args.fov_y, args.fov_z)
+matrix_size = (args.matrix_x, args.matrix_y, args.matrix_z)
 
 ## data loading
 data = cfl.read_cfl(fname+'_datam')
-traj = np.real(cfl.read_cfl(fname+'_trajm'))
-dcf = cfl.read_cfl(fname+'_dcf2m')
+traj = np.real(cfl.read_cfl(fname+'_traj'))
+dcf = cfl.read_cfl(fname+'_dcf')
 nf_scale = res_scale
 nf_arr = np.sqrt(np.sum(traj[0,0,0,0,:,:]**2,axis = 1)) 
 nf_e = np.sum(nf_arr<np.max(nf_arr)*nf_scale)
@@ -60,15 +66,13 @@ traj = traj[...,:nf_e,:]
 data = data[...,:nf_e,:]
 dcf = dcf[...,:nf_e,:]
 
-nphase,nEcalib,nCoil,npe,nfe,_ = data.shape
-tshape = (np.int(np.max(traj[...,0])-np.min(traj[...,0]))
-          ,np.int(np.max(traj[...,1])-np.min(traj[...,1]))
-          ,np.int(np.max(traj[...,2])-np.min(traj[...,2])))
+nphase,nEcalib,nCoil,nv,nsp,_ = data.shape
+tshape = (int(matrix_size[2]*scale[2])),int(matrix_size[1]*scale[1]) ,int(matrix_size[0]*scale[0])
 
 ### calibration
-ksp = np.reshape(np.transpose(data,(2,1,0,3,4,5)),(nCoil,nphase*npe,nfe))
-dcf2 = np.reshape(np.transpose(dcf**2,(2,1,0,3,4,5)),(nphase*npe,nfe))
-coord = np.reshape(np.transpose(traj,(2,1,0,3,4,5)),(nphase*npe,nfe,3))
+ksp = np.reshape(np.transpose(data,(2,1,0,3,4,5)),(nCoil,nphase*nv,nsp))
+dcf2 = np.reshape(np.transpose(dcf**2,(2,1,0,3,4,5)),(nphase*nv,nsp))
+coord = np.reshape(np.transpose(traj,(2,1,0,3,4,5)),(nphase*nv,nsp,3))
 
 mps = ext.jsens_calib(ksp,coord,dcf2,device = sp.Device(device),ishape = tshape)
 S = sp.linop.Multiply(tshape, mps)
@@ -77,10 +81,10 @@ S = sp.linop.Multiply(tshape, mps)
 PFTSs = []
 for i in range(nphase):
     FTs = NFTs((nCoil,)+tshape,traj[i,0,0,...],device=sp.Device(device))
-    W = sp.linop.Multiply((nCoil,npe,nfe,),dcf[i,0,0,:,:,0]) 
+    W = sp.linop.Multiply((nCoil,nv,nsp,),dcf[i,0,0,:,:,0]) 
     FTSs = W*FTs*S
     PFTSs.append(FTSs)
-PFTSs = Diags(PFTSs,oshape=(nphase,nCoil,npe,nfe,),ishape=(nphase,)+tshape)
+PFTSs = Diags(PFTSs,oshape=(nphase,nCoil,nv,nsp,),ishape=(nphase,)+tshape)
 
 ## preconditioner
 wdata = data[:,0,:,:,:,0]*dcf[:,0,:,:,:,0]
