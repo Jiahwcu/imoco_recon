@@ -52,23 +52,27 @@ if __name__ == '__main__':
     # pre-calculated sens map
     mps = cfl.read_cfl(os.path.join(fname, 'sens'))
     # pre-calculated XD-grasp recon
-    imgLs = cfl.read_cfl(os.path.join(fname, 'recon_l1_tv_5'))
+    imgLs = cfl.read_cfl(os.path.join(fname, 'recon_l1_1_tv_5')) # [echo, nresp, ncard, nz, ny, nx]
     nresp, ncard, ne, nCoil, npe, nfe = np.squeeze(data_all).shape
 
-    ## test on a fixed resp phase and across all card phases
-    nphase = ncard
-    traj = np.squeeze(traj_all)[0,:,np.newaxis,np.newaxis,...]
-    data = np.squeeze(data_all)[0,:,np.newaxis,1,...,np.newaxis]
+    ## flatten resp and card phases
+    nphase = ncard*nresp
+    traj = np.squeeze(traj_all)[:,:,np.newaxis,np.newaxis,np.newaxis,...] # [resp, card, 1, 1, 1, npe, nfe, 1]
+    data = np.squeeze(data_all)[:,:,np.newaxis,...,np.newaxis] # [resp, card, 1, echo, coil, npe, nfe, 1]
     # need to take sqrt of the spiral output kdens for dcf
-    dcf = np.tile(np.sqrt(kdens), (nphase, npe, 1))[:,np.newaxis,np.newaxis,...,np.newaxis]
+    dcf = np.tile(np.sqrt(kdens), (nresp, ncard, npe, 1))[:,:,np.newaxis,np.newaxis,np.newaxis,...,np.newaxis] # [nresp, ncard, 1, 1, 1, npe, nfe, 1]
+    # reshape the input to stack ncard along nresp, as [resp*card, 1, echo, coil, npe, nfe, 1]
+    data  = data.reshape((-1,)+data.shape[2:])
+    traj  = traj.reshape((-1,)+traj.shape[2:])
+    dcf  = dcf.reshape((-1,)+dcf.shape[2:])
     traj[...,[0,2]] = traj[...,[2,0]] # row-major data struct so the order is (kz, ky, kx)
-    imgL = np.squeeze(imgLs[0,0,...]) # select the first echo/first resp phase
-    tshape = imgL.shape[1::] # output size in image domain
+    imgLs = np.transpose(imgLs, (1,2,0,3,4,5)) # [nresp, ncard, echo, nz, ny, nx]
+    imgL = imgLs.reshape((-1,)+imgLs.shape[2:]) # [nresp*ncard, echo, nz, ny, nx]
+    tshape = imgL.shape[2::] # output size in image domain
 
     ## imoco recon params
     lambda_TV = 0.05
     outer_iter = 20
-    reg_flag = 0
 
     ## calibration
     print('Calibration...')
@@ -78,18 +82,20 @@ if __name__ == '__main__':
     print('Registration...')
     M_fields = []
     iM_fields = []
+    imgL_comb_mag = np.sqrt(np.sum(np.abs(imgL)**2,1))
+    # nref = ncard - 1 # take the last cardiac phase of the first resp phase
     if reg_flag == 1:
         for i in range(nphase):
-            M_field, iM_field = reg.ANTsReg(np.abs(imgL[n_ref]), np.abs(imgL[i]))
+            M_field, iM_field = reg.ANTsReg(imgL_comb_mag[n_ref], imgL_comb_mag[i])
             M_fields.append(M_field)
             iM_fields.append(iM_field)
         M_fields = np.asarray(M_fields)
         iM_fields = np.asarray(iM_fields)
-        np.save(os.path.join(fname, 'M_mr_resp0.npy'),M_fields)
-        np.save(os.path.join(fname, 'iM_mr_resp0.npy'),iM_fields)
+        np.save(os.path.join(fname, 'M_mr.npy'),M_fields)
+        np.save(os.path.join(fname, 'iM_mr.npy'),iM_fields)
     else:
-        M_fields = np.load(os.path.join(fname,'M_mr_resp0.npy'))
-        iM_fields = np.load(os.path.join(fname,'iM_mr_resp0.npy'))
+        M_fields = np.load(os.path.join(fname,'M_mr.npy'))
+        iM_fields = np.load(os.path.join(fname,'iM_mr.npy'))
 
     # numpy array to list
     iM_fields = [iM_fields[i] for i in range(iM_fields.shape[0])]
@@ -119,10 +125,10 @@ if __name__ == '__main__':
     Is = []
     for i in range(nphase):
         Is.append(sp.linop.Identity(tshape))
-        FTs = NFTs((nCoil,)+tshape,traj[i,0,0,...],device=sp.Device(device))
+        FTs = NFTs((nCoil,)+tshape,traj[i,0,0,0,...],device=sp.Device(device))
         M = reg.interp_op(tshape,M_fields[i])
         M = DLD(M,device=sp.Device(device))
-        W = sp.linop.Multiply((nCoil,npe,nfe,),dcf[i,0,0,:,:,0]) 
+        W = sp.linop.Multiply((nCoil,npe,nfe,),dcf[i,0,0,0,:,:,0]) 
         FTSM = W*FTs*S*M
         PFTSMs.append(FTSM)
     PFTSMs = Diags(PFTSMs,oshape=(nphase,nCoil,npe,nfe,),ishape=(nphase,)+tshape)*Vstacks(Is,ishape=tshape,oshape=(nphase,)+tshape)
@@ -131,7 +137,7 @@ if __name__ == '__main__':
     print('Preconditioner calculation...')
     tmp = PFTSMs.H*PFTSMs*np.complex64(np.ones(tshape))
     L=np.mean(np.abs(tmp))
-    wdata = data[:,0,:,:,:,0]*dcf[:,0,:,:,:,0]*1e4
+    wdata = data[:,0,...,0]*dcf[:,0,...,0]*1e4
     
     TV = sp.linop.FiniteDifference(PFTSMs.ishape,axes = (0,1,2))
     ####### debug
@@ -140,21 +146,26 @@ if __name__ == '__main__':
     
     # ADMM
     print('Recon...')
-    alpha = np.max(np.abs(PFTSMs.H*wdata))
-    ###### debug
-    print('alpha:{}'.format(alpha))
     sigma = 0.4
     tau = 0.4
-    X = np.zeros(tshape,dtype=np.complex64)
-    p = np.zeros_like(wdata)
-    X0 = np.zeros_like(X)
-    q = np.zeros((3,)+tshape,dtype=np.complex64)
-    for i in range(outer_iter):
-        p = (p + sigma*(PFTSMs*X-wdata))/(1+sigma)
-        q = (q + sigma*TV*X)
-        q = q/(np.maximum(np.abs(q),alpha)/alpha)
-        X0 = X
-        X = X-tau*(1/L*PFTSMs.H*p + lambda_TV*TV.H*q)
-        print('outer iter:{}, res:{}'.format(i,np.linalg.norm(X-X0)/np.linalg.norm(X)))
+    Xs = []
+    for ie in range(ne):
+        alpha = np.max(np.abs(PFTSMs.H*wdata[:,ie,...]))
+        ###### debug
+        print('alpha:{}'.format(alpha))
+        X = np.zeros(tshape,dtype=np.complex64)
+        p = np.zeros_like(wdata[:,ie,...])
+        X0 = np.zeros_like(X)
+        q = np.zeros((3,)+tshape,dtype=np.complex64)
+        for i in range(outer_iter):
+            p = (p + sigma*(PFTSMs*X-wdata[:,ie,...]))/(1+sigma)
+            q = (q + sigma*TV*X)
+            q = q/(np.maximum(np.abs(q),alpha)/alpha)
+            X0 = X
+            X = X-tau*(1/L*PFTSMs.H*p + lambda_TV*TV.H*q)
+            print('outer iter:{}, res:{}'.format(i,np.linalg.norm(X-X0)/np.linalg.norm(X)))
+        Xs.append(X)
         
-        cfl.write_cfl(os.path.join(fname, 'imoco_test_resp0'), X)
+    # np.save(os.path.join(fname, 'imoco_allphase.npy'), Xs)
+    Xs = np.stack(Xs, 0)
+    cfl.write_cfl(os.path.join(fname, 'recon_imoco_all'), Xs)
