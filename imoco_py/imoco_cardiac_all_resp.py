@@ -52,7 +52,7 @@ if __name__ == '__main__':
     # pre-calculated sens map
     mps = cfl.read_cfl(os.path.join(fname, 'sens'))
     # pre-calculated XD-grasp recon
-    imgLs = cfl.read_cfl(os.path.join(fname, 'recon_l1_1_tv_5')) # [echo, nresp, ncard, nz, ny, nx]
+    imgLs = cfl.read_cfl(os.path.join(fname, 'recon_l1_tv_5')) # [echo, nresp, ncard, nz, ny, nx]
     nresp, ncard, ne, nCoil, npe, nfe = np.squeeze(data_all).shape
 
     ## flatten resp and card phases
